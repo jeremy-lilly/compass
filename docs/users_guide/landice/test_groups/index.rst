@@ -15,6 +15,7 @@ physics but that are not run routinely.
    antarctica
    calving_dt_convergence
    circular_shelf
+   crane
    dome
    eismint2
    ensemble_generator
@@ -24,6 +25,7 @@ physics but that are not run routinely.
    hydro_radial
    ismip6_forcing
    ismip6_run
+   isunnguata_sermia
    kangerlussuaq
    koge_bugt_s
    mismipplus

@@ -17,13 +17,13 @@ jobs:
       docs_version: "latest"
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           persist-credentials: false
           fetch-depth: 0
 
       - name: Cache Conda
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         env:
           # Increase this value to reset cache if deploy/conda-dev-spec.template has not changed in the workflow
           CACHE_NUMBER: 0
@@ -34,13 +34,10 @@ jobs:
 
       - if: ${{ steps.skip_check.outputs.should_skip != 'true' }}
         name: Set up Conda Environment
-        uses: conda-incubator/setup-miniconda@v2
+        uses: conda-incubator/setup-miniconda@v3
         with:
           activate-environment: "compass_ci"
-          miniforge-variant: Mambaforge
           miniforge-version: latest
-          use-mamba: true
-          mamba-version: "*"
           channels: conda-forge,e3sm/label/compass,defaults
           channel-priority: strict
           auto-update-conda: true
@@ -49,6 +46,7 @@ jobs:
       - if: ${{ steps.skip_check.outputs.should_skip != 'true' }}
         name: Install compass
         run: |
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
           ./conda/configure_compass_env.py \
             --env_only \
             --env_name compass_test \

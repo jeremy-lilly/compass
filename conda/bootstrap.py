@@ -9,6 +9,7 @@ import shutil
 import socket
 import stat
 import subprocess
+import time
 from configparser import ConfigParser
 
 import progressbar
@@ -22,7 +23,7 @@ from shared import (
     get_conda_base,
     get_logger,
     get_spack_base,
-    install_miniconda,
+    install_miniforge,
     log_message,
     parse_args,
 )
@@ -42,7 +43,7 @@ def get_config(config_file, machine):
             config.read(str(machine_config))
 
         machine_config = os.path.join(here, '..', 'compass', 'machines',
-                                      '{}.cfg'.format(machine))
+                                      f'{machine}.cfg')
         config.read(machine_config)
 
     if config_file is not None:
@@ -213,13 +214,16 @@ def get_env_setup(args, config, machine, compiler, mpi, env_type, source_path,
         ver = version.parse(compass_version)
         release_version = '.'.join(str(vr) for vr in ver.release)
         spack_env = f'dev_compass_{release_version}{env_suffix}'
+        compass_env = f'dev_compass_{compass_version}{env_suffix}'
     elif env_type == 'test_release':
         spack_env = f'test_compass_{compass_version}{env_suffix}'
+        compass_env = spack_env
     else:
         spack_env = f'compass_{compass_version}{env_suffix}'
+        compass_env = spack_env
 
     if env_name is None or env_type != 'dev':
-        env_name = spack_env
+        env_name = compass_env
 
     # add the compiler and MPI library to the spack env name
     spack_env = f'{spack_env}_{compiler}_{mpi}{lib_suffix}'
@@ -229,10 +233,9 @@ def get_env_setup(args, config, machine, compiler, mpi, env_type, source_path,
     env_path = os.path.join(conda_base, 'envs', env_name)
 
     source_activation_scripts = \
-        f'source {conda_base}/etc/profile.d/conda.sh && ' \
-        f'source {conda_base}/etc/profile.d/mamba.sh'
+        f'source {conda_base}/etc/profile.d/conda.sh'
 
-    activate_env = f'{source_activation_scripts} && mamba activate {env_name}'
+    activate_env = f'{source_activation_scripts} && conda activate {env_name}'
 
     return python, recreate, conda_mpi, activ_suffix, env_suffix, \
         activ_path, env_path, env_name, activate_env, spack_env
@@ -241,10 +244,11 @@ def get_env_setup(args, config, machine, compiler, mpi, env_type, source_path,
 def build_conda_env(env_type, recreate, mpi, conda_mpi, version,
                     python, source_path, conda_template_path, conda_base,
                     env_name, env_path, activate_base, use_local,
-                    local_conda_build, logger, local_mache):
+                    local_conda_build, logger, local_mache, update_jigsaw,
+                    with_alphabetalab):
 
     if env_type != 'dev':
-        install_miniconda(conda_base, activate_base, logger)
+        install_miniforge(conda_base, activate_base, logger)
 
     if conda_mpi == 'nompi':
         mpi_prefix = 'nompi'
@@ -268,8 +272,7 @@ def build_conda_env(env_type, recreate, mpi, conda_mpi, version,
 
     activate_env = \
         f'source {conda_base}/etc/profile.d/conda.sh &&' \
-        f'source {conda_base}/etc/profile.d/mamba.sh &&' \
-        f'mamba activate {env_name}'
+        f'conda activate {env_name}'
 
     with open(f'{conda_template_path}/spec-file.template', 'r') as f:
         template = Template(f.read())
@@ -293,28 +296,24 @@ def build_conda_env(env_type, recreate, mpi, conda_mpi, version,
     else:
         spec_filename = None
 
-    if not os.path.exists(env_path) or recreate:
+    if not os.path.exists(env_path):
+        recreate = True
+
+    if recreate:
         print(f'creating {env_name}')
         if env_type == 'dev':
             # install dev dependencies and compass itself
             commands = \
                 f'{activate_base} && ' \
-                f'mamba create -y -n {env_name} {channels} ' \
+                f'conda create -y -n {env_name} {channels} ' \
                 f'--file {spec_filename} {packages}'
             check_call(commands, logger=logger)
-
-            commands = \
-                f'{activate_env} && ' \
-                f'cd {source_path} && ' \
-                f'python -m pip install -e .'
-            check_call(commands, logger=logger)
-
         else:
             # conda packages don't like dashes
             version_conda = version.replace('-', '')
             packages = f'{packages} "compass={version_conda}={mpi_prefix}_*"'
             commands = f'{activate_base} && ' \
-                       f'mamba create -y -n {env_name} {channels} {packages}'
+                       f'conda create -y -n {env_name} {channels} {packages}'
             check_call(commands, logger=logger)
     else:
         if env_type == 'dev':
@@ -322,19 +321,71 @@ def build_conda_env(env_type, recreate, mpi, conda_mpi, version,
             # install dev dependencies and compass itself
             commands = \
                 f'{activate_base} && ' \
-                f'mamba install -y -n {env_name} {channels} ' \
+                f'conda install -y -n {env_name} {channels} ' \
                 f'--file {spec_filename} {packages}'
-            check_call(commands, logger=logger)
-
-            commands = \
-                f'{activate_env} && ' \
-                f'cd {source_path} && ' \
-                f'python -m pip install -e .'
             check_call(commands, logger=logger)
         else:
             print(f'{env_name} already exists')
 
     if env_type == 'dev':
+        if with_alphabetalab:
+            print('Installing AlphaBetaLab\n')
+            commands = \
+                f'{activate_env} && ' \
+                f'cd {source_path} && ' \
+                f'git submodule update --init alphaBetaLab &&' \
+                f'cd {source_path}/alphaBetaLab&& ' \
+                f'conda install -y --file dev-spec.txt && ' \
+                f'python -m pip install --no-deps -e .'
+            check_call(commands, logger=logger)
+
+        if recreate or update_jigsaw:
+            # remove conda jigsaw and jigsaw-python
+            t0 = time.time()
+            commands = \
+                f'{activate_env} && ' \
+                f'conda remove -y --force-remove jigsaw jigsawpy'
+            check_call(commands, logger=logger)
+
+            commands = \
+                f'{activate_env} && ' \
+                f'cd {source_path} && ' \
+                f'git submodule update --init jigsaw-python'
+            check_call(commands, logger=logger)
+
+            print('Building JIGSAW\n')
+            # add build tools to deployment env, not compass env
+            commands = \
+                f'conda install -y cmake cxx-compiler && ' \
+                f'cd {source_path}/jigsaw-python && ' \
+                f'python setup.py build_external'
+            check_call(commands, logger=logger)
+
+            print('Installing JIGSAW and JIGSAW-Python\n')
+            commands = \
+                f'{activate_env} && ' \
+                f'cd {source_path}/jigsaw-python && ' \
+                f'python -m pip install --no-deps -e . && ' \
+                f'cp jigsawpy/_bin/* ${{CONDA_PREFIX}}/bin'
+            check_call(commands, logger=logger)
+
+            t1 = time.time()
+            total = t1 - t0
+            message = f'JIGSAW install took {total:.1f} s.'
+            if logger is None:
+                print(message)
+            else:
+                logger.info(message)
+
+        # install (or reinstall) compass in edit mode
+        print('Installing compass\n')
+        commands = \
+            f'{activate_env} && ' \
+            f'cd {source_path} && ' \
+            f'rm -rf compass.egg-info && ' \
+            f'python -m pip install -e .'
+        check_call(commands, logger=logger)
+
         print('Installing pre-commit\n')
         commands = \
             f'{activate_env} && ' \
@@ -593,6 +644,7 @@ def write_load_compass(template_path, activ_path, conda_base, env_type,
                # update the compass installation to point here
                mkdir -p conda/logs
                echo Reinstalling compass package in edit mode...
+               rm -rf compass.egg-info
                python -m pip install -e . &> conda/logs/install_compass.log
                echo Done.
                echo
@@ -929,10 +981,9 @@ def main():  # noqa: C901
     conda_base = os.path.abspath(conda_base)
 
     source_activation_scripts = \
-        f'source {conda_base}/etc/profile.d/conda.sh && ' \
-        f'source {conda_base}/etc/profile.d/mamba.sh'
+        f'source {conda_base}/etc/profile.d/conda.sh'
 
-    activate_base = f'{source_activation_scripts} && mamba activate'
+    activate_base = f'{source_activation_scripts} && conda activate'
 
     compilers, mpis = get_compilers_mpis(config, machine, args.compilers,
                                          args.mpis, source_path)
@@ -990,12 +1041,12 @@ def main():  # noqa: C901
                 env_type, recreate, mpi, conda_mpi, compass_version,
                 python, source_path, conda_template_path, conda_base,
                 conda_env_name, conda_env_path, activate_base, args.use_local,
-                args.local_conda_build, logger, local_mache)
+                args.local_conda_build, logger, local_mache,
+                args.update_jigsaw, args.with_alphabetalab)
 
             if local_mache:
                 print('Install local mache\n')
                 commands = f'source {conda_base}/etc/profile.d/conda.sh && ' \
-                           f'source {conda_base}/etc/profile.d/mamba.sh && ' \
                            f'conda activate {conda_env_name} && ' \
                            'cd ../build_mache/mache && ' \
                            'python -m pip install .'
